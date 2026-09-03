@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+  <meta charset="UTF-8">
+  <!-- महत्वपूर्ण: मोबाइल के Native Zoom को फिर से इनेबल करें (user-scalable=yes) -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      background-color: #323639;
+      font-family: Arial, sans-serif;
+      /* मोबाइल पर स्मूथ स्क्रॉलिंग के लिए ब्राउज़र को संभालने दें */
+      -webkit-overflow-scrolling: touch; 
+    }
+
+    /* मुख्य पीडीएफ कंटेनर: केवल इसे सेंटर में रखें, स्क्रॉलिंग बॉडी पर होगी */
+    #pdf-viewer {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 10px 0;
+      width: 100%;
+      box-sizing: border-box;
+    }
+
+    /* हर पेज के लिए कंटेनर: रेंडरिंग पूरी होने तक जगह बनाए रखता है */
+    .page-container {
+      position: relative;
+      width: 96%;
+      max-width: 800px;
+      margin-bottom: 12px;
+      box-shadow: 0 4px 10px rgba(0,0,0,0.4);
+      background-color: white;
+      /* पहला पेज रेंडर होने तक अनुमानित ऊंचाई सेट करें */
+      min-height: 500px; 
+    }
+
+    canvas {
+      display: block;
+      width: 100%; /* स्क्रीन की चौड़ाई पर फिट करें */
+      height: auto !important; /* ऊंचाई ऑटो पर रखें */
+    }
+
+    /* --- फुल स्क्रीन लोडर --- */
+    #loader-container {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background-color: #323639;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      z-index: 2000;
+      transition: opacity 0.3s ease, visibility 0.3s ease;
+    }
+
+    .spinner {
+      border: 6px solid #f3f3f3;
+      border-top: 6px solid #007bff;
+      border-radius: 50%;
+      width: 50px;
+      height: 50px;
+      animation: spin 1s linear infinite;
+    }
+
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+
+    #loader-container.hidden {
+      opacity: 0;
+      visibility: hidden;
+    }
+
+    /* --- फ्लोटिंग डाउनलोड बटन --- */
+    .fab-container {
+      position: fixed;
+      bottom: 25px;
+      right: 25px;
+      z-index: 1000;
+      visibility: hidden; 
+      opacity: 0;
+      transition: opacity 0.3s ease, visibility 0.3s ease;
+    }
+    
+    .fab-container.visible {
+        visibility: visible;
+        opacity: 0;
+    }
+
+    .fab-main {
+      width: 50px;
+      height: 50px;
+      border-radius: 50%;
+      background-color: #8d5df9;
+      border: none;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+      cursor: pointer;
+      text-decoration: none;
+    }
+
+    .fab-main svg { width: 25px; height: 25px; fill: white; }
+
+    #error-message {
+      color: white;
+      background-color: rgba(255,0,0,0.5);
+      padding: 20px;
+      margin: 20px;
+      border-radius: 8px;
+      text-align: center;
+      display: none;
+      z-index: 3000;
+      position: relative;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- लोडर स्क्रीन -->
+  <div id="loader-container">
+    <div class="spinner"></div>
+    <p style="color:white; margin-top:15px; font-size:14px;">Load हो रहा है...</p>
+  </div>
+
+  <div id="error-message"></div>
+
+  <!-- मुख्य पीडीएफ व्यूअर कंटेनर -->
+  <div id="pdf-viewer"></div>
+
+  <div class="fab-container" id="fab-container">
+      <a class="fab-main" id="btn-download" href="#" download title="Download PDF">
+        <svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+      </a>
+  </div>
+
+  <script>
+    // PDF.js वर्कर सेट करें
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
+
+    const urlParams = new URLSearchParams(window.location.search);
+    const pdfUrl = urlParams.get('file');
+    const pdfViewer = document.getElementById('pdf-viewer');
+    const errorBox = document.getElementById('error-message');
+    const loader = document.getElementById('loader-container');
+    const fabContainer = document.getElementById('fab-container');
+
+    let pdfDoc = null;
+    let isFirstPageSetup = false;
+    let pagesRendering = new Set(); // ट्रैक करें कि कौन से पेज रेंडर हो रहे हैं
+
+    function showError(message) {
+      errorBox.innerHTML = message;
+      errorBox.style.display = 'block';
+      loader.classList.add('hidden'); 
+    }
+
+    // लोडर छिपाने का फ़ंक्शन (एक बार पहला पेज सेटअप हो जाने पर)
+    function hideLoader() {
+      if (!isFirstPageSetup) {
+        isFirstPageSetup = true;
+        loader.classList.add('hidden');
+        fabContainer.classList.add('visible');
+      }
+    }
+
+    // --- पेज रेंडर करने का फ़ंक्शन (सिर्फ एक बार अच्छी क्वालिटी में) ---
+    async function renderPage(pageNum, canvas, container) {
+      if (pagesRendering.has(pageNum)) return; 
+      pagesRendering.add(pageNum);
+
+      try {
+        const page = await pdfDoc.getPage(pageNum);
+        
+        // धुंधलापन ठीक करने के लिए डिवाइस DPR के साथ अच्छी क्वालिटी रेंडरिंग
+        // हम एक बार में ही अच्छी क्वालिटी रेंडर करेंगे, ताकि native zoom पर भी ठीक दिखे।
+        const dpr = window.devicePixelRatio || 1;
+        
+        // हम मूल व्यूपोर्ट लेते हैं (scale 1 पर)
+        const unscaledViewport = page.getViewport({ scale: 1 });
+        
+        // मोबाइल स्क्रीन की चौड़ाई के हिसाब से फिट-टू-विड्थ स्केल तय करें
+        const logicalWidth = Math.min(window.innerWidth, 800) - 20; 
+        const baseFitScale = logicalWidth / unscaledViewport.width;
+
+        // *** महत्वपूर्ण ***: अच्छी क्वालिटी के लिए हम scale को dpr से गुणा करते हैं।
+        // हम एक निश्चित, अच्छी क्वालिटी स्केल (e.g., 1.25 * dpr) का उपयोग करेंगे।
+        const qualityScale = baseFitScale * 1.25 * dpr;
+        const viewport = page.getViewport({ scale: qualityScale });
+
+        const context = canvas.getContext('2d', { alpha: false });
+        
+        // कैनवास की आंतरिक पिक्सेल चौड़ाई/ऊंचाई सेट करें (हाई रिज़ॉल्यूशन)
+        canvas.height = viewport.height;
+        canvas.width = viewport.width;
+        
+        // कैनवास की CSS ऊंचाई को समायोजित करें ताकि यह स्क्रीन पर सही साइज़ में दिखे
+        const cssHeight = Math.floor(unscaledViewport.height * baseFitScale);
+        container.style.minHeight = `${cssHeight}px`; // Placeholder की ऊंचाई अपडेट करें
+        
+        // रेंडर करें
+        await page.render({ canvasContext: context, viewport: viewport }).promise;
+
+      } catch (err) {
+        console.error(`पेज ${pageNum} एरर:`, err);
+      } finally {
+        pagesRendering.delete(pageNum);
+      }
+    }
+
+    // --- Lazy Loading (On-Scroll rendering) Logic ---
+    let pageContainers = [];
+
+    function setupLazyLoading() {
+      // IntersectionObserver API का उपयोग करें
+      const observer = new IntersectionObserver((entries) => {
+        entries.forEach((entry) => {
+          const pageNum = parseInt(entry.target.dataset.pageNum);
+          
+          if (entry.isIntersecting) {
+            // पेज स्क्रीन पर दिखाई दे रहा है, तो कैनवास बनाएं और रेंडर करें
+            if (!entry.target.hasCanvas) {
+                const canvas = document.createElement('canvas');
+                entry.target.appendChild(canvas);
+                entry.target.hasCanvas = true;
+                renderPage(pageNum, canvas, entry.target);
+            }
+          } else {
+            // पेज स्क्रीन से बाहर चला गया है, कैनवास हटा दें (मेमोरी खाली करने के लिए)
+            if (entry.target.hasCanvas) {
+                const canvas = entry.target.querySelector('canvas');
+                if (canvas) {
+                    // कैनवास को रेंडरिंग रद्द करने को कहें (अगर ज़रूरी हो)
+                    pagesRendering.delete(pageNum); 
+                    canvas.remove();
+                }
+                entry.target.hasCanvas = false;
+            }
+          }
+        });
+      }, {
+        root: null, // बॉडी व्यू पोर्ट
+        threshold: 0.1 // 10% दिखने पर लोड करें
+      });
+
+      // हर पेज कंटेनर को ऑब्ज़र्व करें
+      pageContainers.forEach(container => observer.observe(container));
+    }
+
+    // --- लोड और इनिशियलाइज़ेशन ---
+
+    if (pdfUrl) {
+      const finalDownloadUrl = pdfUrl.includes('://') ? pdfUrl : window.location.href.split('?')[0].replace('index.html','') + pdfUrl;
+      document.getElementById('btn-download').href = finalDownloadUrl;
+
+      // PDF लोड करना शुरू करें
+      pdfjsLib.getDocument(pdfUrl).promise.then(async (pdf) => {
+        pdfDoc = pdf;
+        
+        // पहला पेज लोड करें ताकि हम पेज की ऊंचाई का अनुमान लगा सकें
+        const firstPage = await pdf.getPage(1);
+        const unscaledViewport = firstPage.getViewport({ scale: 1 });
+        const logicalWidth = Math.min(window.innerWidth, 800) - 20; 
+        const estimatedHeight = Math.floor(unscaledViewport.height * (logicalWidth / unscaledViewport.width));
+
+        // PDF के सभी पेजों के लिए Placeholder (`.page-container`) बनाएं
+        for (let i = 1; i <= pdf.numPages; i++) {
+          const container = document.createElement('div');
+          container.className = 'page-container';
+          container.dataset.pageNum = i;
+          container.style.minHeight = `${estimatedHeight}px`; // अनुमानित ऊंचाई
+          container.hasCanvas = false; // ट्रैक करें कि क्या कैनवास मौजूद है
+          pdfViewer.appendChild(container);
+          pageContainers.push(container);
+        }
+        
+        // पहला पेज SETUP हो गया, लोडर छिपाएं
+        hideLoader();
+        
+        // Lazy loading सेटअप करें
+        setupLazyLoading();
+        
+      }).catch(err => {
+        console.error(err);
+        showError(`एरर: PDF लोड नहीं हो सकी।<br>${err.message}`);
+      });
+    } else {
+      showError("एरर: लिंक में PDF का नाम नहीं मिला!");
+    }
+
+  </script>
+</body>
+</html>
